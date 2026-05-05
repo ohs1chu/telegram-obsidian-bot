@@ -4,6 +4,7 @@ import re
 import threading
 from datetime import datetime
 
+import dropbox
 from dotenv import load_dotenv
 from flask import Flask
 from openai import OpenAI
@@ -14,22 +15,26 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SAVE_PATH = os.getenv("SAVE_PATH")
+SAVE_PATH = os.getenv("SAVE_PATH", "/tmp")
+
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+DROPBOX_TARGET_FOLDER = os.getenv("DROPBOX_TARGET_FOLDER", "/AlexBrain/00_Inbox")
 
 if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN 이 .env에 없습니다.")
+    raise ValueError("TELEGRAM_BOT_TOKEN 이 없습니다.")
 
 if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY 가 .env에 없습니다.")
+    raise ValueError("OPENAI_API_KEY 가 없습니다.")
 
-if not SAVE_PATH:
-    raise ValueError("SAVE_PATH 가 .env에 없습니다.")
+if not DROPBOX_ACCESS_TOKEN:
+    raise ValueError("DROPBOX_ACCESS_TOKEN 이 없습니다.")
 
 os.makedirs(SAVE_PATH, exist_ok=True)
 
 client = OpenAI(api_key=OPENAI_API_KEY)
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-# Render Web Service가 요구하는 작은 웹서버
+# Render Web Service용 작은 웹서버
 app_flask = Flask(__name__)
 
 @app_flask.route("/")
@@ -50,12 +55,14 @@ def sanitize_filename(name: str) -> str:
 def normalize_tags(tags):
     if not isinstance(tags, list):
         return ["telegram", "inbox"]
+
     clean = []
     for tag in tags:
         if isinstance(tag, str):
             t = tag.strip().replace(" ", "_")
             if t:
                 clean.append(t)
+
     return clean[:8] if clean else ["telegram", "inbox"]
 
 
@@ -152,6 +159,19 @@ def analyze_with_gpt(user_text: str) -> dict:
         }
 
 
+def upload_to_dropbox(filename: str, markdown: str) -> str:
+    folder = DROPBOX_TARGET_FOLDER.rstrip("/")
+    dropbox_path = f"{folder}/{filename}"
+
+    dbx.files_upload(
+        markdown.encode("utf-8"),
+        dropbox_path,
+        mode=dropbox.files.WriteMode.overwrite
+    )
+
+    return dropbox_path
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -167,18 +187,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         analyzed = analyze_with_gpt(user_text)
         title = analyzed.get("title", "무제 메모")
+
         filename = sanitize_filename(
             f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{title}"
         ) + ".md"
-        file_path = os.path.join(SAVE_PATH, filename)
 
         markdown = build_markdown(analyzed, user_text)
 
-        with open(file_path, "w", encoding="utf-8") as f:
+        # Render 서버 임시 저장도 하고
+        local_path = os.path.join(SAVE_PATH, filename)
+        with open(local_path, "w", encoding="utf-8") as f:
             f.write(markdown)
 
+        # Dropbox에도 업로드
+        dropbox_path = upload_to_dropbox(filename, markdown)
+
         await update.message.reply_text(
-            f"저장 완료 📁\n제목: {title}\n경로: {file_path}"
+            f"저장 완료 📁\n제목: {title}\nDropbox 경로: {dropbox_path}"
         )
 
     except Exception as e:
@@ -187,7 +212,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    # Render Web Service용 웹서버 실행
     threading.Thread(target=run_web, daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
