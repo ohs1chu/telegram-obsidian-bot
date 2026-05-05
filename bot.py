@@ -17,7 +17,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SAVE_PATH = os.getenv("SAVE_PATH", "/tmp")
 
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-DROPBOX_TARGET_FOLDER = os.getenv("DROPBOX_TARGET_FOLDER", "/AlexBrain/00_Inbox")
+DROPBOX_ROOT_FOLDER = os.getenv("DROPBOX_ROOT_FOLDER", "/Alex Brain")
 
 PUBLIC_URL = os.getenv("PUBLIC_URL")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "telegram-webhook")
@@ -42,12 +42,18 @@ dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 app = Flask(__name__)
 
 
+FOLDER_MAP = {
+    "inbox": "00_Inbox",
+    "journal": "01_Daily",
+    "work": "02_Work",
+    "idea": "03_Ideas",
+    "todo": "04_Todo",
+}
+
+
 def telegram_api(method: str, payload: dict | None = None):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
-
-    if payload is None:
-        payload = {}
-
+    payload = payload or {}
     data = urllib.parse.urlencode(payload).encode("utf-8")
 
     with urllib.request.urlopen(url, data=data, timeout=30) as response:
@@ -99,12 +105,26 @@ def normalize_tags(tags):
     return clean[:8] if clean else ["telegram", "inbox"]
 
 
+def normalize_note_type(note_type: str) -> str:
+    allowed = {"inbox", "journal", "work", "idea", "todo"}
+
+    if not isinstance(note_type, str):
+        return "inbox"
+
+    note_type = note_type.strip().lower()
+
+    if note_type in allowed:
+        return note_type
+
+    return "inbox"
+
+
 def build_markdown(data: dict, original_text: str) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     title = data.get("title", "무제 메모").strip()
     summary = data.get("summary", "").strip()
-    note_type = data.get("note_type", "inbox").strip()
+    note_type = normalize_note_type(data.get("note_type", "inbox"))
     tags = normalize_tags(data.get("tags", []))
     key_points = data.get("key_points", [])
     action_items = data.get("action_items", [])
@@ -146,7 +166,7 @@ tags: [{tags_yaml}]
 
 def analyze_with_gpt(user_text: str) -> dict:
     prompt = f"""
-너는 Obsidian용 메모를 구조화하는 비서다.
+너는 Obsidian용 메모를 구조화하고 분류하는 비서다.
 아래 텍스트를 분석해서 반드시 JSON 객체만 출력해라.
 설명, 코드블록, 머리말 없이 JSON만 출력한다.
 
@@ -159,6 +179,13 @@ def analyze_with_gpt(user_text: str) -> dict:
   "key_points": ["핵심1", "핵심2"],
   "action_items": ["실행1", "실행2"]
 }}
+
+note_type 분류 기준:
+- work: 회사, 업무, 회의, 보고서, 프로젝트, 고객, 산업/시장 분석, 투자/비즈니스 관련 메모
+- journal: 일상, 감정, 건강 상태, 하루 기록, 개인적인 생각
+- idea: 아이디어, 기획, 만들고 싶은 것, 자동화 구상, 사업 아이디어
+- todo: 명확한 할 일, 리마인더, 체크리스트성 입력
+- inbox: 애매하거나 분류가 어려운 입력
 
 규칙:
 - title은 너무 길지 않게
@@ -180,7 +207,9 @@ def analyze_with_gpt(user_text: str) -> dict:
     text = response.output_text.strip()
 
     try:
-        return json.loads(text)
+        data = json.loads(text)
+        data["note_type"] = normalize_note_type(data.get("note_type", "inbox"))
+        return data
     except json.JSONDecodeError:
         return {
             "title": "메모 정리 실패",
@@ -192,8 +221,16 @@ def analyze_with_gpt(user_text: str) -> dict:
         }
 
 
-def upload_to_dropbox(filename: str, markdown: str) -> str:
-    folder = DROPBOX_TARGET_FOLDER.rstrip("/")
+def get_target_dropbox_folder(note_type: str) -> str:
+    note_type = normalize_note_type(note_type)
+    subfolder = FOLDER_MAP.get(note_type, "00_Inbox")
+
+    root = DROPBOX_ROOT_FOLDER.rstrip("/")
+    return f"{root}/{subfolder}"
+
+
+def upload_to_dropbox(filename: str, markdown: str, note_type: str) -> str:
+    folder = get_target_dropbox_folder(note_type)
     dropbox_path = f"{folder}/{filename}"
 
     dbx.files_upload(
@@ -210,6 +247,7 @@ def process_text_message(chat_id: int, user_text: str):
 
     analyzed = analyze_with_gpt(user_text)
     title = analyzed.get("title", "무제 메모")
+    note_type = normalize_note_type(analyzed.get("note_type", "inbox"))
 
     filename = sanitize_filename(
         f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{title}"
@@ -221,11 +259,11 @@ def process_text_message(chat_id: int, user_text: str):
     with open(local_path, "w", encoding="utf-8") as f:
         f.write(markdown)
 
-    dropbox_path = upload_to_dropbox(filename, markdown)
+    dropbox_path = upload_to_dropbox(filename, markdown, note_type)
 
     send_telegram_message(
         chat_id,
-        f"저장 완료 📁\n제목: {title}\nDropbox 경로: {dropbox_path}",
+        f"저장 완료 📁\n제목: {title}\n분류: {note_type}\nDropbox 경로: {dropbox_path}",
     )
 
 
