@@ -1,9 +1,11 @@
 import os
 import json
 import re
+import threading
 from datetime import datetime
 
 from dotenv import load_dotenv
+from flask import Flask
 from openai import OpenAI
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
@@ -26,6 +28,17 @@ if not SAVE_PATH:
 os.makedirs(SAVE_PATH, exist_ok=True)
 
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Render Web Service가 요구하는 작은 웹서버
+app_flask = Flask(__name__)
+
+@app_flask.route("/")
+def home():
+    return "Bot is running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app_flask.run(host="0.0.0.0", port=port)
 
 
 def sanitize_filename(name: str) -> str:
@@ -174,6 +187,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    # Render Web Service용 웹서버 실행
+    threading.Thread(target=run_web, daemon=True).start()
+
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
